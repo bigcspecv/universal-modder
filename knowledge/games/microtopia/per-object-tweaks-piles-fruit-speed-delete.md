@@ -66,13 +66,10 @@ EXCHANGE TYPES | PICKUPS | INFINITE | HARDNESS | FRUIT | POLLUTION
   (`Dictionary<PickupType,int>`, internal).
 
 ## 1. Infinite piles, per instance
-`ExtractPickup` decompiles to:
-```csharp
-if (startPickups[t] - subtractedPickups[t] > 0 || data.infinite) {
-    SpawnPickup(...); subtractedPickups[t] += 1;   // still increments when infinite
-    extractablePickupsChanged = true; SetSize();
-}
-```
+`BiomeObject.ExtractPickup` spawns a pickup of type `t` while `startPickups[t] - subtractedPickups[t]` is
+above zero or `data.infinite` is set. Either way it then adds one to `subtractedPickups[t]` (even on an
+infinite pile), sets `extractablePickupsChanged` and calls `SetSize()`.
+
 Postfix it and reset `subtractedPickups[t] = 0`. Three things fall out:
 1. per-instance, nothing leaks to other piles of the type;
 2. the pile keeps its **full visual size**, because `SetSize()` is computed from
@@ -100,7 +97,7 @@ touching that field - with **ChangeGrowSpeed** installed a plant read 60s from t
 real roll was 5s. Sample `GrowTimerRoll()` instead (a pure `Random.Range`, so sampling is free of
 side effects, and your own postfix is already inside it). Cache the sample per plant and re-sample
 only when the multiplier changes; both mods postfix the same method and Harmony does not guarantee
-ordering between unrelated plugins.
+ordering between unrelated plugins (unless one names the other in `[HarmonyAfter]`/`[HarmonyBefore]`).
 
 `FindObjectsOfType<FruitPlant>()` returned **4841** components but only **1025** bore fruit: the
 component also sits on fruitless plants (`WIRE_TREE_NO_FRUIT`) with a zero-length `fruitSpots`
@@ -109,18 +106,17 @@ array. Filter on `fruitSpots.Length > 0`.
 ## 3. Stockpile capacity, per instance
 
 A stockpile has **two** limits, in different places, and both have to move or nothing happens.
-
-```csharp
-// Stockpile.HasSpaceLeft
-if (data.storageCapacity - GetCollectedAmount(..) > 0)
-    return base.HasSpaceLeft(..);   // Storage: walks THIS storage's piles, sums maxHeight - GetHeight()
-```
+`Stockpile.HasSpaceLeft` first compares the type's `data.storageCapacity` with `GetCollectedAmount`.
+Only while there's room left does it fall through to the base `Storage.HasSpaceLeft`, which walks this
+storage's own piles and sums `maxHeight - GetHeight()`.
 
 1. **The soft cap** is `BuildingData.storageCapacity` - per type again, read by `HasSpaceLeft`,
    `CanInsert_Intake` and `CapacityInfo`. Raise it in a prefix and restore it in a
    `[HarmonyFinalizer]`, exactly like the infinity glyph. Use a **LIFO stack** of saved values
    rather than one field, because `CanInsert_Intake` calls on through to `HasSpaceLeft` and the
-   patches nest.
+   patches nest. (HarmonyX's `__state` parameter does this for you: it's a local of each patched
+   call, shared by the patch class's prefix and finalizer. Set the raised value from the vanilla
+   number rather than multiplying whatever the field holds, or the nested prefix raises it twice.)
 2. **The physical stacks** are `Pile.maxHeight`, and those really are per instance, so scale them
    directly. `Pile.Write` persists only the pickup list, never the heights, so the scaling lives
    for the session and never reaches the save.
@@ -132,14 +128,9 @@ Re-apply the heights from `BuildingUpdate` rather than once at `Init`: `PileConf
 piles from the prefab, so a stockpile built later (or rebuilt) comes back at vanilla heights.
 
 **The send mechanism needs no separate work.** "Send everything to another stockpile" is an assign
-action whose loop is
-
-```csharp
-// Stockpile.Assign
-if (!target.CanInsert(..)) break;    // Building.CanInsert -> Stockpile.CanInsert_Intake
-```
-
-so it passes through the same gate and respects a boosted target automatically.
+action (`Stockpile.Assign`) whose loop stops as soon as `target.CanInsert` fails, and
+`Building.CanInsert` goes to `Stockpile.CanInsert_Intake`. So it passes through the same gate and
+respects a boosted target automatically.
 
 `Storage.GetSpaceInPiles` looks like it matters and does not: it caches a per-building-**code**
 total in a static dictionary, and nothing calls it.
@@ -174,11 +165,8 @@ of `prefabs.fods` has **`N BUILDS` = 1** and `NO DEMOLISH`, the tutorial sequenc
 (`Playthrough.gynesFlown`) - they never land as new queens.
 
 `Hunger` is constructed per queen but assigns the static `Hunger.main = this` and takes the tier
-list by **reference**:
-
-```csharp
-this.tiers = GlobalValues.standard.hungerTiers;   // not a copy
-```
+list by **reference**: its `tiers` field is the `GlobalValues.standard.hungerTiers` list itself, not a
+copy.
 
 `GlobalValues.standard` outlives a world load, so capture the vanilla rows once per session and
 rebuild every world's table from that baseline. Writing deltas on top of whatever is currently
@@ -186,15 +174,9 @@ there compounds across loads.
 
 ### The guard that makes edits look like no-ops
 
-The obvious way to apply a change is `Hunger.EnergyChanged()`, and it is wrong:
-
-```csharp
-void EnergyChanged() {
-    int t = GetTier(energy);
-    if (t != curTier) SetTier(t);     // only when the INDEX changes
-    UpdateHungerUI();
-}
-```
+The obvious way to apply a change is `Hunger.EnergyChanged()`, and it is wrong. It looks up the
+stage for the current energy with `GetTier`, calls `SetTier` only when that **index** differs from
+`curTier`, and then calls `UpdateHungerUI`.
 
 `SetTier` is the only thing that copies a row into `curLarvaRate` / `curMaxPopulation` /
 `curDrain`. Editing the stage the queen is **already in** leaves the index unchanged, so nothing is
@@ -219,13 +201,9 @@ the old one - which is exactly the bug above, hidden. Read `Hunger.get_larvaRate
 
 ### One setting silently stops the game's core loop
 
-`Queen.BuildingUpdate` lays only while the colony is under the cap:
-
-```csharp
-if (GameManager.GetAntCount() < hunger.maxPopulation || FreeLarvae() || bonusLarva > 0)
-    larvaProductionStage = 1;
-return;
-```
+`Queen.BuildingUpdate` normally lays only while the colony is under the cap: it starts a new larva
+(`larvaProductionStage = 1`) only when `GameManager.GetAntCount()` is below `hunger.maxPopulation`,
+or when `FreeLarvae()` is true or `bonusLarva` is above zero.
 
 So lowering `maxPopulation` below the current population - including by **resetting to defaults
 after the colony has grown past them** - stops the queen completely, with nothing on screen to say
@@ -255,9 +233,9 @@ over a Unity game without taking input from it.
    panels, hover tooltips, cursor changes - also pauses under the window.
 
 ## 5. Sandbox delete button in normal games
-`DebugSettings.DeletableEverything()` is
-`deletableEverything || Player.cheatDeletableEverything || WorldSettings.sandbox`, and it gates the
-delete button on `BiomeObject`, `Ant` and `Pickup` plus `Building.CanDemolish`.
+`DebugSettings.DeletableEverything()` returns true when the class's own `deletableEverything` flag,
+`Player.cheatDeletableEverything` or `WorldSettings.sandbox` is set, and it gates the delete button on
+`BiomeObject`, `Ant` and `Pickup` plus `Building.CanDemolish`.
 
 Setting `Player.cheatDeletableEverything` is the obvious route and the wrong one:
 `Player.CheatsToInt` / `FillCheatsFromInt` **serialise the cheat flags into the save**. Postfix the
@@ -298,40 +276,11 @@ method's return value instead and the whole thing stays runtime-only.
   through autosaves, quicksaves and renamed saves with no hooks at all. Resolve it lazily - the
   seed is only correct after a save has been read.
 
-## Gotchas
-1. **F9 is the game's quickload.** A diagnostic bound there fires your code *and* quickloads. F8
-   is free.
-2. `ClickableObject.linkId` is 0 for biome objects, so it is useless as an instance id; world
-   position rounded to 0.1 works.
-3. Unity's `Screen.width/height` is the **render** resolution (3840x2160 here) while the window
-   client is 2560x1440 at 150% DPI. `Camera.main.WorldToScreenPoint` returns render pixels with a
-   bottom-left origin; scale by client/render and flip Y before feeding `um win drive`.
-4. `um win drive` re-focuses per invocation, which closes any open dropdown. Put open-then-select
-   clicks in **one** `drive` call.
-5. `um publish check` flags your own plugin DLL as "game file copied verbatim" once you have
-   installed it into `BepInEx/plugins` - it compares against the game install. Lint a copy without
-   the DLL to see the real result.
-6. Two limits that ship equal look like one limit. A stockpile's soft cap and its summed pile
-   heights are both 160 in vanilla, so a mod that raises only the cap appears to do nothing, and
-   the symptom shows up somewhere unrelated - "sending between stockpiles only ever moves 160".
-   Check for a second ceiling before concluding a number is being ignored.
-7. A setter behind a guard is not a setter. `Hunger.EnergyChanged` only calls `SetTier` when the
-   tier index changes, so editing the row the game is currently using does nothing until it
-   happens to switch rows. Any tiered stat table is worth checking for this shape before
-   concluding your write did not land.
-8. A column that caps a live quantity can stop a core loop silently. Lowering `maxPopulation`
-   below the current ant count - or resetting to defaults after growing past them - halts larva
-   production with no feedback, and reads as a broken mod.
-9. The community **AdvancedSettings** mod writes game values directly rather than patching:
-   `ChangeStorageCapacity()` walks `GameManager.EStockpiles()` and assigns
-   `s.data.storageCapacity` (per type) and each `Pile.maxHeight`. It only touches stockpiles that
-   already exist, so one built afterwards keeps vanilla heights until it runs again. Its shipped
-   `MaxHeight` is 20, which **is** the vanilla height, so out of the box it raises only the cap.
-
 ## Build without a .NET SDK
 Unity Mono games need no SDK: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` with
 `-nostdlib+ -noconfig` and references into `Microtopia_Data/Managed` plus `BepInEx/core` is enough,
-and it takes multiple source files in one call.
+and it takes multiple source files in one call. That compiler only goes up to C# 5: no string
+interpolation, `nameof`, `?.` or expression-bodied members.
 
 For inspecting the assembly, **`Mono.Cecil.dll` already ships in `BepInEx/core`** - load it from
 PowerShell (copy it locally and `Unblock-File` first, or `Add-Type` fails with 0x80131515) and you
@@ -378,3 +327,42 @@ loads clean and the pile reads its normal count again. Nothing mod-specific is w
 **Not verified:** anything outside v1.2.2; capacity on `StockpileLarge` / `StockpileColossal` (only
 `STOCKPILE2` was driven); the `animationSpeed` and `color` columns of `HungerTier`, which the
 editor deliberately leaves alone.
+
+## Gotchas
+1. **F9 is the game's quickload.** A diagnostic bound there fires your code *and* quickloads. F8
+   is free.
+2. `ClickableObject.linkId` is 0 for biome objects, so it is useless as an instance id; world
+   position rounded to 0.1 works.
+3. Unity's `Screen.width/height` is the **render** resolution (3840x2160 here) while the window
+   client is 2560x1440 at 150% DPI. `Camera.main.WorldToScreenPoint` returns render pixels with a
+   bottom-left origin; scale by client/render and flip Y before feeding `um win drive`.
+4. `um win drive` re-focuses per invocation, which closes any open dropdown. Put open-then-select
+   clicks in **one** `drive` call. It moves the real mouse, so ask the human first, and not while
+   they're typing.
+5. `um publish check` flags your own plugin DLL as "game file copied verbatim" once you have
+   installed it into `BepInEx/plugins` - it compares against the game install. Lint a copy without
+   the DLL to see the real result.
+6. Two limits that ship equal look like one limit. A stockpile's soft cap and its summed pile
+   heights are both 160 in vanilla, so a mod that raises only the cap appears to do nothing, and
+   the symptom shows up somewhere unrelated - "sending between stockpiles only ever moves 160".
+   Check for a second ceiling before concluding a number is being ignored.
+7. A setter behind a guard is not a setter. `Hunger.EnergyChanged` only calls `SetTier` when the
+   tier index changes, so editing the row the game is currently using does nothing until it
+   happens to switch rows. Any tiered stat table is worth checking for this shape before
+   concluding your write did not land.
+8. A column that caps a live quantity can stop a core loop silently. Lowering `maxPopulation`
+   below the current ant count - or resetting to defaults after growing past them - halts larva
+   production with no feedback, and reads as a broken mod.
+9. The community **AdvancedSettings** mod writes game values directly rather than patching:
+   `ChangeStorageCapacity()` walks `GameManager.EStockpiles()` and assigns
+   `s.data.storageCapacity` (per type) and each `Pile.maxHeight`. It only touches stockpiles that
+   already exist, so one built afterwards keeps vanilla heights until it runs again. Its shipped
+   `MaxHeight` is 20, which **is** the vanilla height, so out of the box it raises only the cap.
+
+## Credits
+- [BepInEx](https://github.com/BepInEx/BepInEx) 5 and [HarmonyX](https://github.com/BepInEx/HarmonyX), which
+  ships with it as `0Harmony.dll`.
+- The community mods compared above, both on Nexus Mods:
+  [Advanced Settings](https://www.nexusmods.com/microtopia/mods/2) by Rianaid (it needs
+  [CoreFramework](https://www.nexusmods.com/microtopia/mods/3)) and
+  [ChangeGrowSpeed](https://www.nexusmods.com/microtopia/mods/4).
