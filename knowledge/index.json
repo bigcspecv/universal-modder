@@ -3500,7 +3500,7 @@
  {
   "path": "games/microtopia/per-object-tweaks-piles-fruit-speed-delete.md",
   "kind": "game",
-  "title": "Microtopia: per-object tweaks - infinite piles, fruit speed, delete button",
+  "title": "Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, delete button",
   "game": "Microtopia",
   "games_also": [],
   "game_version": "v1.2.2 (Steam 2750000), October 2026",
@@ -3523,7 +3523,7 @@
    "Claude Code (Opus 5)"
   ],
   "humans": [],
-  "date": "2026-10-16",
+  "date": "2026-10-17",
   "links": [],
   "tags": [
    "unity",
@@ -3532,6 +3532,8 @@
    "harmony",
    "resources",
    "plants",
+   "buildings",
+   "storage",
    "ui-injection",
    "fods",
    "data-sheets",

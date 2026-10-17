@@ -1,6 +1,6 @@
 ---
 kind: game
-title: "Microtopia: per-object tweaks - infinite piles, fruit speed, delete button"
+title: "Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, delete button"
 game: "Microtopia"
 games_also: []
 game_version: "v1.2.2 (Steam 2750000), October 2026"
@@ -12,18 +12,18 @@ anti_cheat: "none"
 status: working
 agents: ["Claude Code (Opus 5)"]
 humans: []
-date: 2026-10-16
+date: 2026-10-17
 links: []
-tags: [unity, mono, bepinex, harmony, resources, plants, ui-injection, fods, data-sheets, save-compatibility, mod-compatibility]
+tags: [unity, mono, bepinex, harmony, resources, plants, buildings, storage, ui-injection, fods, data-sheets, save-compatibility, mod-compatibility]
 ---
 
-# Microtopia: per-object tweaks - infinite piles, fruit speed, delete button
+# Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, delete button
 
-> Three tweaks that each apply to one chosen object rather than globally: a resource pile that
-> never runs out, a plant whose fruit (energy pod) interval you can read and change, and the
-> sandbox delete button in normal games. The recurring lesson is that Microtopia keeps the
-> interesting flags on **per-type** data objects, so anything "just this one" has to be built from
-> per-instance state instead.
+> Four tweaks that each apply to one chosen object rather than globally: a resource pile that
+> never runs out, a plant whose fruit (energy pod) interval you can read and change, a stockpile
+> with a raised capacity, and the sandbox delete button in normal games. The recurring lesson -
+> hit four times now - is that Microtopia keeps the interesting numbers on **per-type** data
+> objects, so anything "just this one" has to be built from per-instance state instead.
 
 ## Setup
 - **Game:** Steam appid 2750000, `Microtopia_Data/Managed/Assembly-CSharp.dll` (Unity 2021.2.20f1,
@@ -104,7 +104,49 @@ ordering between unrelated plugins.
 component also sits on fruitless plants (`WIRE_TREE_NO_FRUIT`) with a zero-length `fruitSpots`
 array. Filter on `fruitSpots.Length > 0`.
 
-## 3. Sandbox delete button in normal games
+## 3. Stockpile capacity, per instance
+
+A stockpile has **two** limits, in different places, and both have to move or nothing happens.
+
+```csharp
+// Stockpile.HasSpaceLeft
+if (data.storageCapacity - GetCollectedAmount(..) > 0)
+    return base.HasSpaceLeft(..);   // Storage: walks THIS storage's piles, sums maxHeight - GetHeight()
+```
+
+1. **The soft cap** is `BuildingData.storageCapacity` - per type again, read by `HasSpaceLeft`,
+   `CanInsert_Intake` and `CapacityInfo`. Raise it in a prefix and restore it in a
+   `[HarmonyFinalizer]`, exactly like the infinity glyph. Use a **LIFO stack** of saved values
+   rather than one field, because `CanInsert_Intake` calls on through to `HasSpaceLeft` and the
+   patches nest.
+2. **The physical stacks** are `Pile.maxHeight`, and those really are per instance, so scale them
+   directly. `Pile.Write` persists only the pickup list, never the heights, so the scaling lives
+   for the session and never reaches the save.
+
+Vanilla ships the two in parity - a `STOCKPILE2` has `storageCapacity` 160 and 25 piles whose
+heights also sum to 160 - which is why raising one alone looks like it does nothing.
+
+Re-apply the heights from `BuildingUpdate` rather than once at `Init`: `PileConfigurer` builds the
+piles from the prefab, so a stockpile built later (or rebuilt) comes back at vanilla heights.
+
+**The send mechanism needs no separate work.** "Send everything to another stockpile" is an assign
+action whose loop is
+
+```csharp
+// Stockpile.Assign
+if (!target.CanInsert(..)) break;    // Building.CanInsert -> Stockpile.CanInsert_Intake
+```
+
+so it passes through the same gate and respects a boosted target automatically.
+
+`Storage.GetSpaceInPiles` looks like it matters and does not: it caches a per-building-**code**
+total in a static dictionary, and nothing calls it.
+
+**Uninstall is safe even when over capacity.** `Pile.AddToPile` has no fullness check at all, and
+`Storage.Init` replays every stored pickup through it, so a stockpile holding more than vanilla
+allows loads over-full and simply drains. Nothing is lost and nothing throws.
+
+## 4. Sandbox delete button in normal games
 `DebugSettings.DeletableEverything()` is
 `deletableEverything || Player.cheatDeletableEverything || WorldSettings.sandbox`, and it gates the
 delete button on `BiomeObject`, `Ant` and `Pickup` plus `Building.CanDemolish`.
@@ -138,6 +180,24 @@ method's return value instead and the whole thing stays runtime-only.
 - The slot label (`lbSlots`) is rewritten from its loc string every frame, so a suffix can be
   re-applied without accumulating - but it wraps past roughly 16 characters.
 
+## One queen per world
+
+Worth knowing before building anything "per queen": `GameManager.allQueens` is a `List<Queen>` and
+`GetQueenCount()` exists, which makes multiple queens look supported. They are not. The `QUEEN` row
+of `prefabs.fods` has **`N BUILDS` = 1** and `NO DEMOLISH`, the tutorial sequence sets
+`SET_PLACE_QUEEN_TRUE` once and completes on `N_QUEENS 1`, and gynes that fly out are only counted
+(`Playthrough.gynesFlown`) - they do not found colonies. So per queen *is* per world.
+
+`Hunger` is per queen (`Hunger..ctor(Queen)`) but assigns the static `Hunger.main = this` in its
+constructor, and takes its tiers as a **shared reference**:
+
+```csharp
+this.tiers = GlobalValues.standard.hungerTiers;   // not a copy
+```
+
+`GlobalValues.standard` outlives a world load, so anything written there has to be restored or
+re-applied when the world changes, not written once at startup.
+
 ## Keying settings to a world
 - **Do not** hook `Save.StartReading` / `StartWriting`. They also fire for blueprint files, the
   profile save (`main.psav`) and save-list previews, so browsing the load menu silently swaps
@@ -161,6 +221,15 @@ method's return value instead and the whole thing stays runtime-only.
 5. `um publish check` flags your own plugin DLL as "game file copied verbatim" once you have
    installed it into `BepInEx/plugins` - it compares against the game install. Lint a copy without
    the DLL to see the real result.
+6. Two limits that ship equal look like one limit. A stockpile's soft cap and its summed pile
+   heights are both 160 in vanilla, so a mod that raises only the cap appears to do nothing, and
+   the symptom shows up somewhere unrelated - "sending between stockpiles only ever moves 160".
+   Check for a second ceiling before concluding a number is being ignored.
+7. The community **AdvancedSettings** mod writes game values directly rather than patching:
+   `ChangeStorageCapacity()` walks `GameManager.EStockpiles()` and assigns
+   `s.data.storageCapacity` (per type) and each `Pile.maxHeight`. It only touches stockpiles that
+   already exist, so one built afterwards keeps vanilla heights until it runs again. Its shipped
+   `MaxHeight` is 20, which **is** the vanilla height, so out of the box it raises only the cap.
 
 ## Build without a .NET SDK
 Unity Mono games need no SDK: `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` with
@@ -186,6 +255,18 @@ Driving the real `BiomeObject.ExtractPickup` past capacity, unmarked pile as con
 
 Fruit speed, rolling the real generator 20x: base 5s (ChangeGrowSpeed active), 2.5s at 2x, 1.7s
 at 3x.
+
+Stockpile capacity, three stockpiles of one type in one world, read from the live objects:
+
+| stockpile | multiplier | summed pile heights | holding |
+|-----------|-----------:|--------------------:|--------:|
+| control   | 1x | 160 | 160 (full) |
+| B         | 3x | 480 | 160 |
+| C         | 5x | 800 |  39 |
+
+Sampling `data.storageCapacity` from outside the patched calls still read **160** on all three,
+which is the check that matters: if the per-type value had leaked it would read the raised number.
+Raising, lowering and sending between all three produced no errors over a session.
 
 **Save compatibility** was checked by removing the DLL and loading a save created with the mod: it
 loads clean and the pile reads its normal count again. Nothing mod-specific is written to the
