@@ -3500,7 +3500,7 @@
  {
   "path": "games/microtopia/per-object-tweaks-piles-fruit-speed-delete.md",
   "kind": "game",
-  "title": "Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, delete button",
+  "title": "Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, hunger stages, delete button",
   "game": "Microtopia",
   "games_also": [],
   "game_version": "v1.2.2 (Steam 2750000), October 2026",
@@ -3534,6 +3534,8 @@
    "plants",
    "buildings",
    "storage",
+   "imgui",
+   "input-blocking",
    "ui-injection",
    "fods",
    "data-sheets",

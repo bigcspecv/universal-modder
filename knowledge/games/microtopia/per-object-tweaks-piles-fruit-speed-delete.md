@@ -1,6 +1,6 @@
 ---
 kind: game
-title: "Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, delete button"
+title: "Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, hunger stages, delete button"
 game: "Microtopia"
 games_also: []
 game_version: "v1.2.2 (Steam 2750000), October 2026"
@@ -14,16 +14,18 @@ agents: ["Claude Code (Opus 5)"]
 humans: []
 date: 2026-10-17
 links: []
-tags: [unity, mono, bepinex, harmony, resources, plants, buildings, storage, ui-injection, fods, data-sheets, save-compatibility, mod-compatibility]
+tags: [unity, mono, bepinex, harmony, resources, plants, buildings, storage, imgui, input-blocking, ui-injection, fods, data-sheets, save-compatibility, mod-compatibility]
 ---
 
-# Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, delete button
+# Microtopia: per-object tweaks - infinite piles, fruit speed, stockpile capacity, hunger stages, delete button
 
-> Four tweaks that each apply to one chosen object rather than globally: a resource pile that
-> never runs out, a plant whose fruit (energy pod) interval you can read and change, a stockpile
-> with a raised capacity, and the sandbox delete button in normal games. The recurring lesson -
-> hit four times now - is that Microtopia keeps the interesting numbers on **per-type** data
-> objects, so anything "just this one" has to be built from per-instance state instead.
+> Five tweaks: a resource pile that never runs out, a plant whose fruit (energy pod) interval you
+> can read and change, a stockpile with a raised capacity, an editor for the queen's 27-stage
+> hunger table, and the sandbox delete button in normal games. The recurring lesson - hit five
+> times now - is that Microtopia keeps the interesting numbers on **per-type** or shared data
+> objects, so anything "just this one" has to be built from per-instance state instead. The hunger
+> table adds a second lesson: writing a shared value is only half the job, because the consumer
+> may be caching it behind a guard.
 
 ## Setup
 - **Game:** Steam appid 2750000, `Microtopia_Data/Managed/Assembly-CSharp.dll` (Unity 2021.2.20f1,
@@ -146,7 +148,113 @@ total in a static dictionary, and nothing calls it.
 `Storage.Init` replays every stored pickup through it, so a stockpile holding more than vanilla
 allows loads over-full and simply drains. Nothing is lost and nothing throws.
 
-## 4. Sandbox delete button in normal games
+## 4. The queen's hunger stages
+
+`GlobalValues.standard.hungerTiers` is a list of 27 `HungerTier` rows:
+
+```
+name | ifBelow | larvaPerMinute | animationSpeed | maxPopulation | drain | color
+```
+
+and it decides nearly everything about colony growth. The player-facing meanings are not obvious
+from the field names, and are worth writing down because a mod exposing them has to explain them:
+
+- **`ifBelow`** is the stage's energy **ceiling**. `Hunger.GetTier(e)` returns the first row whose
+  `ifBelow` exceeds the queen's energy.
+- **`drain`** is energy lost **per second**: `Hunger.Process(dt)` counts a 1.0s timer down and
+  subtracts `GetCurrentDrain()` once per tick. `GetCurrentDrain` interpolates linearly between the
+  previous row's `drain` and this row's, by where the energy sits between the two `ifBelow` values -
+  so the number in a row is what is reached at the **top** of that stage, not throughout it.
+- **`maxPopulation`** is the HUD's "Max population".
+
+**This is per world, not per queen.** `GameManager.allQueens` is a `List<Queen>` and
+`GetQueenCount()` exists, which makes multiple queens look supported. They are not: the `QUEEN` row
+of `prefabs.fods` has **`N BUILDS` = 1** and `NO DEMOLISH`, the tutorial sequence sets
+`SET_PLACE_QUEEN_TRUE` once and completes on `N_QUEENS 1`, and gynes that fly out are only counted
+(`Playthrough.gynesFlown`) - they never land as new queens.
+
+`Hunger` is constructed per queen but assigns the static `Hunger.main = this` and takes the tier
+list by **reference**:
+
+```csharp
+this.tiers = GlobalValues.standard.hungerTiers;   // not a copy
+```
+
+`GlobalValues.standard` outlives a world load, so capture the vanilla rows once per session and
+rebuild every world's table from that baseline. Writing deltas on top of whatever is currently
+there compounds across loads.
+
+### The guard that makes edits look like no-ops
+
+The obvious way to apply a change is `Hunger.EnergyChanged()`, and it is wrong:
+
+```csharp
+void EnergyChanged() {
+    int t = GetTier(energy);
+    if (t != curTier) SetTier(t);     // only when the INDEX changes
+    UpdateHungerUI();
+}
+```
+
+`SetTier` is the only thing that copies a row into `curLarvaRate` / `curMaxPopulation` /
+`curDrain`. Editing the stage the queen is **already in** leaves the index unchanged, so nothing is
+re-read and she keeps the old numbers until she happens to cross a boundary. Editing any *other*
+stage appears to work, which makes it read as intermittent rather than broken. Call `SetTier`
+unconditionally, asking `GetTier` first because an edited `ifBelow` can move her:
+
+```csharp
+int tier = GetTier(energy);
+SetTier(tier);
+EnergyChanged();      // for UpdateHungerUI
+```
+
+The community **AdvancedSettings** mod called `EnergyChanged` the same way and inherits the same
+blind spot.
+
+### Display the consumer's values, not the row
+
+A readout built from the tier row will happily show the new number while the queen is still using
+the old one - which is exactly the bug above, hidden. Read `Hunger.get_larvaRate()` and
+`Hunger.get_maxPopulation()` instead, so the readout cannot disagree with behaviour.
+
+### One setting silently stops the game's core loop
+
+`Queen.BuildingUpdate` lays only while the colony is under the cap:
+
+```csharp
+if (GameManager.GetAntCount() < hunger.maxPopulation || FreeLarvae() || bonusLarva > 0)
+    larvaProductionStage = 1;
+return;
+```
+
+So lowering `maxPopulation` below the current population - including by **resetting to defaults
+after the colony has grown past them** - stops the queen completely, with nothing on screen to say
+why. Any editor exposing this column should show the live ant count beside the cap and say so in
+words; clamping the input is the wrong fix, because the value is legal.
+
+A second effect compounds the confusion: ants live about three minutes, so a burst of larvae
+creates a cohort that expires together. A sharp population drop some minutes after an experiment is
+ordinary, and it recovers.
+
+## An IMGUI window over a game that does its own input
+
+A 27-row editable grid has no counterpart in the game's prefabs, so it is IMGUI - and IMGUI draws
+over a Unity game without taking input from it.
+
+1. `Screen.height` is the **render** resolution, so an unscaled window is unreadably small on a 4K
+   display. Scale the whole GUI with `GUI.matrix` and work in scaled units.
+2. The game's own mouse pass is `Gameplay.GameplayUpdate()`, called once from `GameManager.Update`.
+   Prefix it to skip **while the cursor is inside the window rect** and the world stops hovering
+   and reacting underneath. Scope it to the rect, not to "window is open", or the rest of the
+   screen goes dead. The rect is in scaled GUI units while `Input.mousePosition` is render pixels
+   with a bottom-left origin, so scale and flip before comparing.
+3. The scroll wheel is read somewhere else entirely: `InputManager.InputUpdate` stores it into the
+   static `InputManager.zoomDelta` and `CamController.CamUpdate` spends it. Zero `zoomDelta` in a
+   postfix while blocking, or scrolling the table zooms the camera.
+4. Side effect worth knowing: anything else riding on `GameplayUpdate` - the game's own click
+   panels, hover tooltips, cursor changes - also pauses under the window.
+
+## 5. Sandbox delete button in normal games
 `DebugSettings.DeletableEverything()` is
 `deletableEverything || Player.cheatDeletableEverything || WorldSettings.sandbox`, and it gates the
 delete button on `BiomeObject`, `Ant` and `Pickup` plus `Building.CanDemolish`.
@@ -180,24 +288,6 @@ method's return value instead and the whole thing stays runtime-only.
 - The slot label (`lbSlots`) is rewritten from its loc string every frame, so a suffix can be
   re-applied without accumulating - but it wraps past roughly 16 characters.
 
-## One queen per world
-
-Worth knowing before building anything "per queen": `GameManager.allQueens` is a `List<Queen>` and
-`GetQueenCount()` exists, which makes multiple queens look supported. They are not. The `QUEEN` row
-of `prefabs.fods` has **`N BUILDS` = 1** and `NO DEMOLISH`, the tutorial sequence sets
-`SET_PLACE_QUEEN_TRUE` once and completes on `N_QUEENS 1`, and gynes that fly out are only counted
-(`Playthrough.gynesFlown`) - they do not found colonies. So per queen *is* per world.
-
-`Hunger` is per queen (`Hunger..ctor(Queen)`) but assigns the static `Hunger.main = this` in its
-constructor, and takes its tiers as a **shared reference**:
-
-```csharp
-this.tiers = GlobalValues.standard.hungerTiers;   // not a copy
-```
-
-`GlobalValues.standard` outlives a world load, so anything written there has to be restored or
-re-applied when the world changes, not written once at startup.
-
 ## Keying settings to a world
 - **Do not** hook `Save.StartReading` / `StartWriting`. They also fire for blueprint files, the
   profile save (`main.psav`) and save-list previews, so browsing the load menu silently swaps
@@ -225,7 +315,14 @@ re-applied when the world changes, not written once at startup.
    heights are both 160 in vanilla, so a mod that raises only the cap appears to do nothing, and
    the symptom shows up somewhere unrelated - "sending between stockpiles only ever moves 160".
    Check for a second ceiling before concluding a number is being ignored.
-7. The community **AdvancedSettings** mod writes game values directly rather than patching:
+7. A setter behind a guard is not a setter. `Hunger.EnergyChanged` only calls `SetTier` when the
+   tier index changes, so editing the row the game is currently using does nothing until it
+   happens to switch rows. Any tiered stat table is worth checking for this shape before
+   concluding your write did not land.
+8. A column that caps a live quantity can stop a core loop silently. Lowering `maxPopulation`
+   below the current ant count - or resetting to defaults after growing past them - halts larva
+   production with no feedback, and reads as a broken mod.
+9. The community **AdvancedSettings** mod writes game values directly rather than patching:
    `ChangeStorageCapacity()` walks `GameManager.EStockpiles()` and assigns
    `s.data.storageCapacity` (per type) and each `Pile.maxHeight`. It only touches stockpiles that
    already exist, so one built afterwards keeps vanilla heights until it runs again. Its shipped
@@ -268,6 +365,16 @@ Sampling `data.storageCapacity` from outside the patched calls still read **160*
 which is the check that matters: if the per-type value had leaked it would read the raised number.
 Raising, lowering and sending between all three produced no errors over a session.
 
+Hunger stages, read from the live `Hunger` object rather than from the row: editing the stage the
+queen was **in** moved the HUD's "Max population" from 500 to 1234 and back immediately, with no
+stage change - the case that silently did nothing before `SetTier` was called unconditionally.
+Raising a cap above the colony size restarted larva production (44 -> 51 -> 60 ants), confirming
+the queen had been gated rather than broken.
+
 **Save compatibility** was checked by removing the DLL and loading a save created with the mod: it
 loads clean and the pile reads its normal count again. Nothing mod-specific is written to the
 `.sav`; settings live in `BepInEx/config/MicrotopiaTweaks/<seed>.txt`.
+
+**Not verified:** anything outside v1.2.2; capacity on `StockpileLarge` / `StockpileColossal` (only
+`STOCKPILE2` was driven); the `animationSpeed` and `color` columns of `HungerTier`, which the
+editor deliberately leaves alone.
