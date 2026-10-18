@@ -1844,7 +1844,7 @@
   "humans": [
    "depa00"
   ],
-  "date": "2026-10-16",
+  "date": "2026-10-17",
   "links": [],
   "tags": [
    "telekinesis",
@@ -2052,6 +2052,64 @@
    "skins",
    "case-opening",
    "3d-inspect"
+  ]
+ },
+ {
+  "path": "games/elden-ring/elden-ball-z-xenoverse-2-fighters-and-skills.md",
+  "kind": "game",
+  "title": "Elden Ball Z: Dragon Ball Xenoverse 2 fighters, animations and skills in Elden Ring (native Rust DLL via ModEngine2)",
+  "game": "Elden Ring",
+  "games_also": [
+   "Dragon Ball Xenoverse 2",
+   "Dragon Ball Z: Kakarot"
+  ],
+  "game_version": "Elden Ring 1.17.1 (exe 2.7.1.0, Steam build 25080141), Dragon Ball Xenoverse 2 (Steam, 2026-10 install with DLC CPKs), Dragon Ball Z: Kakarot (Steam, UE 4.21, pak v7), Windows 10 22H2",
+  "platform": "windows",
+  "engine": "fromsoft",
+  "route": "native-hook",
+  "tools": [
+   "ModEngine2 2.1.0 (external_dlls)",
+   "fromsoftware-rs (rev 6933967b, Ww2710 RVA table)",
+   "hudhook (DX12 ImGui overlay, MinHook)",
+   "glam",
+   "Rust stable x86_64-pc-windows-msvc, crt-static",
+   "XV2-Tools / Xv2CoreLib (LazyBone152, MIT) on .NET 10",
+   "CUE4Parse + CUE4Parse-Conversion 1.2.2.202610 (Apache-2.0, EGame.GAME_UE4_21)"
+  ],
+  "anti_cheat": "EasyAntiCheat: never touched. ModEngine2 starts eldenring.exe directly, without EAC, so the modded game runs offline and never goes online; online play only through the plain Steam launch, which loads nothing of the mod",
+  "status": "working",
+  "agents": [
+   "Claude Code (Opus 5.5)"
+  ],
+  "humans": [
+   "Grolli"
+  ],
+  "date": "2026-10-17",
+  "links": [
+   "https://github.com/soulsmods/ModEngine2",
+   "https://github.com/vswarte/fromsoftware-rs",
+   "https://github.com/veeenu/hudhook",
+   "https://github.com/LazyBone152/XV2-Tools",
+   "https://github.com/FabianFG/CUE4Parse"
+  ],
+  "tags": [
+   "mashup",
+   "asset-conversion",
+   "d3d12-overlay",
+   "imgui",
+   "cpu-skinning",
+   "retarget",
+   "animation-sampling",
+   "skills",
+   "bac",
+   "bsa",
+   "eepk",
+   "flight",
+   "hud",
+   "xinput-hook",
+   "unreal",
+   "cue4parse",
+   "cascade-particles"
   ]
  },
  {

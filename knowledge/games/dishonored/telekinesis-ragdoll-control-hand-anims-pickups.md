@@ -12,7 +12,7 @@ anti_cheat: "none (single-player); offline only"
 status: working
 agents: ["Claude Code (Opus 5.5)"]
 humans: ["depa00"]
-date: 2026-10-16
+date: 2026-10-17
 links: []
 tags: [telekinesis, ragdoll, physx, impact-damage, first-person-animation, anim-tree, pickups, particles, sound, wwise, bend-time, hot-reload, ue3, reflection]
 ---
@@ -59,11 +59,12 @@ takes `_bLoop, _fInRate, _fStartTime`; `DishonoredNPCPawn.SetPushesRigidBodies(_
 functions of the actual object, not the base class.
 
 **What fails from PostRender.** `Actor.Trace`/`FastTrace` always report nothing/blocked (even 10 uu in empty
-space). `PC.Use()` does nothing. `SetPhysics(PHYS_RigidBody)` is ignored on resting pickups.
-`ForceUpdateComponents(bCollisionUpdate=true)`, `SetRBCollisionChannels(Channels)` and
-`SpawnEmitterMeshAttachment` on a ragdoll bone hit a fatal assert. (The ghost co-op note calls
-`ForceUpdateComponents` from PostRender to move its puppet without trouble; UE3's default is
-`bCollisionUpdate=false`.) These work: `InitRagdoll`/`TermRagdoll`,
+space). Not a render-time problem: they fail the same way from inside `GameInfo.Timer` (world tick, see Open
+questions), while `Actor.TraceComponent` against one given component works. `PC.Use()` does nothing.
+`SetPhysics(PHYS_RigidBody)` is ignored on resting pickups. `ForceUpdateComponents(bCollisionUpdate=true)`,
+`SetRBCollisionChannels(Channels)` and `SpawnEmitterMeshAttachment` on a ragdoll bone hit a fatal assert.
+(The ghost co-op note calls `ForceUpdateComponents` from PostRender to move its puppet without trouble;
+UE3's default is `bCollisionUpdate=false`.) These work: `InitRagdoll`/`TermRagdoll`,
 `SetRBLinearVelocity`, `AddImpulse(bVelChange)` on a bone, `SetRBPosition`, `GetBoneLocation`,
 `RB_BodyInstance.GetUnrealWorldVelocity`, `SetRBCollidesWithChannel`, `TakeDamage`, `SpawnEmitter`,
 particle `SetTranslation`/`SetScale`/`DeactivateSystem`/`KillParticlesForced`, anim `SetAnim`/`PlayAnim`,
@@ -189,13 +190,15 @@ weapon wheel. Patching the vtables of `IDirectInput8::CreateDevice` and, for `GU
 ## Gotchas
 1. **Symptom:** F6 slow motion changes nothing. **Cause:** `WorldInfo.TimeDilation` is ignored.
    **Fix:** write a `m_BendTimeInfo` channel (9 is not saved).
-2. **Symptom:** traces never hit anything. **Cause:** collision queries fail from PostRender.
-   **Fix:** cone targeting over `PawnList` / KActors.
+2. **Symptom:** traces never hit anything. **Cause:** not found. `Trace`/`FastTrace` called through
+   ProcessEvent fail in every context tried (PostRender and `GameInfo.Timer`), while `TraceComponent` hits
+   through the same path (but see the native-index lead in Open questions). **Fix:** cone targeting over
+   `PawnList` / KActors.
 3. **Symptom:** native call "returns nothing". **Cause:** a subclass override with renamed parameters; unknown
    names are silently ignored. **Fix:** dump the object's own functions and fill both names.
 4. **Symptom:** `GameViewportClient.Tick` hook never fires; a probe of 659 script functions on the player
    objects saw only `HUD.PostRender` and `GameInfo.Timer`. **Cause:** gameplay is native. **Fix:** stay in
-   PostRender.
+   PostRender. `GameInfo.Timer` runs only once a second, and traces fail there too (Open questions).
 5. **Symptom:** thrown guard flies through walls. **Cause:** living-pawn RB channel/mask. **Fix:** DeadPawn
    channel + raw mask 0x00050221.
 6. **Symptom:** thrown guard stops mid-air against a building front. **Cause:** BlockingVolume channel.
@@ -252,8 +255,21 @@ One long working day (about 9 hours), roughly 60 hot reloads and 8 game crashes 
 - The real cause of the ~10 m freeze of script-created ragdolls (a native system tied to living NPCs or to
   ragdolls not started by the death path?). Finding it would remove the unstick workaround.
 - A natural get-up animation instead of `TermRagdoll`.
-- A per-tick hook for physics work (traces would then work). A lead, not tried: `GameInfo.Timer`, which the
-  Gotcha 4 probe saw firing, is a looping `SetTimer` callback (in UDK, `GameInfo.SetGameSpeed` starts it at the
-  time-dilation rate, about once a second), so it likely runs during the world tick. Swapping its `Func` would
-  be a cheap test of whether traces and `SetLocation` work from there.
+- A per-tick hook for physics work. `GameInfo.Timer` was tried (2026-10-17, same build): it fires exactly
+  once a second (15 calls in 15 s), and with its `Func` swapped, `Actor.Trace` from inside it still returns
+  None with HitLocation (0,0,0), the same as from PostRender. So traces do not fail because of render time.
+  The same ProcessEvent path works for `Actor.TraceComponent`: against the player's CollisionCylinder it hits
+  (z 4099.5, normal 0,0,1) and returns `true`. World line checks fail for every variant tried: `Trace`
+  returns None with `ExtraTraceFlags` 0-15, with a box extent, with bTraceActors 0 and 1, and called on the
+  pawn, the PC or WorldInfo, and `FastTrace` returns false ("blocked") even for 50 uu of empty air 5 km above
+  the map. Either Dishonored routes world queries some other way, or the call itself goes wrong (next
+  item). `SetLocation` from the Timer was not tested.
+- A lead on the traces, not tried: every call that fails quietly here and in the ghost co-op note is a native
+  with a fixed index in UDK's `Actor.uc`: `Trace` (277), `FastTrace` (548), `SetLocation` (267),
+  `SetRotation` (299), `Move` (266), `Destroy` (279) and `SetPhysics` (3970). The natives that work have no
+  index: `TraceComponent`, `Spawn`, `SetHidden`, `ConsoleCommand`, `InitRagdoll`, `SetRBPosition`,
+  `AddImpulse`. Public UE3 SDK generators special-case such functions when calling them through
+  ProcessEvent: TFL's generator sets `UFunction::iNative` to 0 for the call and restores it after, and
+  BmSDK's generated wrappers also clear `FUNC_Native`. Check `iNative` on these functions in this build, and
+  try the same around one `Trace` call.
 - Other NPC skeletons, rats (crowd agents), other gadgets.

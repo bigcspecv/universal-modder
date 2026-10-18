@@ -214,7 +214,9 @@ two-copy restarts. Each automated restart into the mission takes about 4 minutes
 ## Open questions
 - Which script event runs inside the world tick and lets `SetLocation`/`Destroy` succeed? This is needed for
   doors, NPCs and deaths. The telekinesis note's probe of 659 script functions on the player objects saw only
-  `HUD.PostRender` and `GameInfo.Timer` fire (its Gotcha 4).
+  `HUD.PostRender` and `GameInfo.Timer` fire (its Gotcha 4). That note has since tried `GameInfo.Timer`:
+  traces fail there too (`SetLocation` from it is untested). Its Open questions have a lead that may cover
+  `SetLocation`/`Move`/`Destroy` as well: like `Trace`, they are natives with a fixed index.
 - Giving the ghost a head (NPC `Attachments`) and animation (anim tree on a non-pawn owner, or a real AI-less
   `DishonoredNPCPawn`).
 - Stable cross-process actor IDs for level-placed vs spawner-spawned actors.
